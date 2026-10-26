@@ -64,7 +64,7 @@ const { FFmpeg } = FFmpegWASM;
 const { fetchFile, toBlobURL } = FFmpegUtil;
 
 const $ = id => document.getElementById(id);
-const ffmpeg = new FFmpeg();
+let ffmpeg = null;
 let loaded = false;
 let fileIdx = 0, fileTotal = 1;
 
@@ -110,11 +110,15 @@ function setPct(p, label) {
   $("pct").textContent = (label ? label + " " : "") + Math.round(p) + "%";
 }
 
-ffmpeg.on("log", ({ message }) => console.log(message));
-ffmpeg.on("progress", ({ progress }) => {
-  const p = Math.min(1, Math.max(0, progress));
-  setPct(((fileIdx + p) / fileTotal) * 100, "প্রসেস");
-});
+function makeFFmpeg() {
+  const f = new FFmpeg();
+  f.on("log", ({ message }) => console.log(message));
+  f.on("progress", ({ progress }) => {
+    const p = Math.min(1, Math.max(0, progress));
+    setPct(((fileIdx + p) / fileTotal) * 100, "প্রসেস");
+  });
+  return f;
+}
 
 function errText(e) {
   if (e === undefined || e === null) return "এরর বার্তা নেই (ওয়ার্কার চালু হয়নি)";
@@ -148,7 +152,7 @@ async function blobURLWithProgress(url, mime, cb) {
 async function loadFFmpeg() {
   if (loaded) return;
   $("status").textContent = "ffmpeg লোড হচ্ছে (প্রথমবার ~30MB)...";
-  const core = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd";
+  const core = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist";
   const lib  = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd";
 
   // wasm ফাইলের আনুমানিক সাইজ (সার্ভার সাইজ না জানালে এটা দিয়ে % হিসাব হবে)
@@ -159,21 +163,34 @@ async function loadFFmpeg() {
   };
 
   setPct(1, "ডাউনলোড");
-  const coreURL = await blobURLWithProgress(`${core}/ffmpeg-core.js`, "text/javascript");
-  const wasmURL = await blobURLWithProgress(`${core}/ffmpeg-core.wasm`, "application/wasm", onDl);
+  // wasm দুই ধরনের core-তেই একই, তাই একবারই নামাই
+  const wasmURL = await blobURLWithProgress(`${core}/esm/ffmpeg-core.wasm`, "application/wasm", onDl);
   const classWorkerURL = await blobURLWithProgress(`${lib}/814.ffmpeg.js`, "text/javascript");
   setPct(100, "ডাউনলোড");
 
   $("status").textContent = "ডাউনলোড শেষ। ffmpeg চালু হচ্ছে...";
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(
-    "ffmpeg চালু হয়নি। ফাইলটা সরাসরি ফোন থেকে খুললে এমন হয়। GitHub Pages-এ আপলোড করে লিংক থেকে খুলুন।"
-  )), 60000));
-  try {
-    await Promise.race([ffmpeg.load({ coreURL, wasmURL, classWorkerURL }), timeout]);
-  } catch (e) {
-    throw new Error("[ffmpeg চালু হওয়ার ধাপ] " + errText(e));
+  const errors = [];
+  // ওয়ার্কার module হিসেবে চলে, তাই আগে ESM core; না হলে UMD দিয়ে আবার চেষ্টা
+  for (const flavor of ["esm", "umd"]) {
+    const inst = makeFFmpeg();
+    let timer;
+    try {
+      const coreURL = await blobURLWithProgress(`${core}/${flavor}/ffmpeg-core.js`, "text/javascript");
+      const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(
+        "ffmpeg চালু হয়নি। ফাইলটা সরাসরি ফোন থেকে খুললে এমন হয়। GitHub Pages-এ আপলোড করে লিংক থেকে খুলুন।"
+      )), 60000); });
+      await Promise.race([inst.load({ coreURL, wasmURL, classWorkerURL }), timeout]);
+      clearTimeout(timer);
+      ffmpeg = inst;
+      loaded = true;
+      return;
+    } catch (e) {
+      clearTimeout(timer);
+      errors.push(flavor + ": " + errText(e));
+      try { inst.terminate(); } catch (_) {}
+    }
   }
-  loaded = true;
+  throw new Error("[ffmpeg চালু হওয়ার ধাপ] " + errors.join(" | "));
 }
 
 function ext(file, fallback) {
