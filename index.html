@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ভিডিও ট্রিম ও থাম্বনেইল</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --card:#f4f4f5; --accent:#2563eb; --muted:#666; --warn:#c2410c; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#111; --fg:#eee; --card:#1e1e20; --accent:#3b82f6; --muted:#999; --warn:#fb923c; --bad:#f87171; }
+  }
+  :root[data-theme="dark"] { --bg:#111; --fg:#eee; --card:#1e1e20; --accent:#3b82f6; --muted:#999; --warn:#fb923c; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+         font-family:system-ui,-apple-system,"Noto Sans Bengali",sans-serif; }
+  main { max-width:480px; margin:0 auto; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  h1 { font-size:1.2rem; margin:0; }
+  #theme { width:auto; margin:0; padding:8px 12px; background:var(--card); color:var(--fg); font-size:1.1rem; }
+  label { display:block; margin:14px 0 6px; font-weight:600; }
+  input[type=file], input[type=number] { width:100%; padding:10px; background:var(--card);
+         color:var(--fg); border:0; border-radius:8px; font-size:1rem; }
+  button { width:100%; margin-top:18px; padding:14px; font-size:1rem; font-weight:600;
+           background:var(--accent); color:#fff; border:0; border-radius:8px; }
+  button:disabled { opacity:.5; }
+  progress { width:100%; margin-top:8px; display:none; }
+  #pct { margin-top:6px; font-size:1.6rem; font-weight:700; text-align:center; min-height:1.8em; }
+  #status { margin-top:6px; color:var(--muted); min-height:1.4em; }
+  #files { margin-top:10px; padding:0; list-style:none; }
+  #files li { padding:8px 10px; margin-top:6px; background:var(--card); border-radius:8px; font-size:.9rem; word-break:break-all; }
+  .ok { color:var(--fg); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  #result a { display:block; margin-top:10px; padding:12px; text-align:center;
+              background:#16a34a; color:#fff; border-radius:8px; text-decoration:none; font-weight:600; word-break:break-all; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ভিডিওর শুরু কাটুন + থাম্বনেইল বসান</h1>
+    <button id="theme" type="button" aria-label="থিম বদলান">🌓</button>
+  </header>
+
+  <label for="video">ভিডিও (একটা বা একাধিক)</label>
+  <input type="file" id="video" accept="video/*" multiple>
+  <ul id="files"></ul>
+
+  <label for="thumb">থাম্বনেইল ছবি (JPG/PNG)</label>
+  <input type="file" id="thumb" accept="image/jpeg,image/png">
+
+  <label for="secs">শুরু থেকে কত সেকেন্ড কাটবেন</label>
+  <input type="number" id="secs" value="5" min="0" step="0.1">
+
+  <button id="go">শুরু করুন</button>
+  <progress id="bar" max="100" value="0"></progress>
+  <div id="pct"></div>
+  <div id="status"></div>
+  <div id="result"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<script>
+const { FFmpeg } = FFmpegWASM;
+const { fetchFile, toBlobURL } = FFmpegUtil;
+
+const $ = id => document.getElementById(id);
+const ffmpeg = new FFmpeg();
+let loaded = false;
+let fileIdx = 0, fileTotal = 1;
+
+const GB = 1024 * 1024 * 1024;
+const LIMIT = 2 * GB;     // এর বেশি হলে ব্রাউজারে ফেল করবে
+const CAUTION = 1 * GB;   // এর বেশি হলে ঝুঁকি আছে
+
+/* ---------- থিম ---------- */
+function applyTheme(t) { document.documentElement.setAttribute("data-theme", t); }
+try { const t = localStorage.getItem("theme"); if (t) applyTheme(t); } catch (e) {}
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const isDark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const next = isDark ? "light" : "dark";
+  applyTheme(next);
+  try { localStorage.setItem("theme", next); } catch (e) {}
+};
+
+/* ---------- সাইজ সতর্কতা ---------- */
+function fmt(bytes) {
+  return bytes >= GB ? (bytes / GB).toFixed(2) + " GB" : (bytes / 1048576).toFixed(1) + " MB";
+}
+function sizeClass(size) { return size > LIMIT ? "bad" : size > CAUTION ? "warn" : "ok"; }
+
+$("video").onchange = () => {
+  const list = $("files");
+  list.innerHTML = "";
+  for (const f of $("video").files) {
+    const li = document.createElement("li");
+    li.className = sizeClass(f.size);
+    let note = "";
+    if (f.size > LIMIT) note = " ⛔ ২GB-র বেশি, ব্রাউজারে চলবে না (বাদ যাবে)। Termux ব্যবহার করুন।";
+    else if (f.size > CAUTION) note = " ⚠️ বড় ফাইল, ফেল করতে পারে।";
+    li.textContent = f.name + " (" + fmt(f.size) + ")" + note;
+    list.appendChild(li);
+  }
+};
+
+/* ---------- শতকরা ---------- */
+function setPct(p, label) {
+  p = Math.min(100, Math.max(0, p));
+  $("bar").value = p;
+  $("pct").textContent = (label ? label + " " : "") + Math.round(p) + "%";
+}
+
+ffmpeg.on("progress", ({ progress }) => {
+  const p = Math.min(1, Math.max(0, progress));
+  setPct(((fileIdx + p) / fileTotal) * 100, "প্রসেস");
+});
+
+/* ---------- % সহ ডাউনলোড ---------- */
+async function blobURLWithProgress(url, mime, cb) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("ডাউনলোড ব্যর্থ: " + resp.status);
+  const total = parseInt(resp.headers.get("content-length")) || 0;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    cb(received, total);
+  }
+  return URL.createObjectURL(new Blob(chunks, { type: mime }));
+}
+
+/* ---------- ffmpeg লোড ---------- */
+async function loadFFmpeg() {
+  if (loaded) return;
+  $("status").textContent = "ffmpeg লোড হচ্ছে (প্রথমবার ~30MB)...";
+  const core = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd";
+  const lib  = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd";
+
+  // wasm ফাইলের আনুমানিক সাইজ (সার্ভার সাইজ না জানালে এটা দিয়ে % হিসাব হবে)
+  const WASM_SIZE = 32129114;
+  const onDl = (received, total) => {
+    const t = (total && received <= total) ? total : WASM_SIZE;
+    setPct(Math.max(1, Math.min(100, (received / t) * 100)), "ডাউনলোড");
+  };
+
+  setPct(1, "ডাউনলোড");
+  const coreURL = await toBlobURL(`${core}/ffmpeg-core.js`, "text/javascript");
+  const wasmURL = await blobURLWithProgress(`${core}/ffmpeg-core.wasm`, "application/wasm", onDl);
+  const classWorkerURL = await toBlobURL(`${lib}/814.ffmpeg.js`, "text/javascript");
+  setPct(100, "ডাউনলোড");
+
+  $("status").textContent = "ডাউনলোড শেষ। ffmpeg চালু হচ্ছে...";
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(
+    "ffmpeg চালু হয়নি। ফাইলটা সরাসরি ফোন থেকে খুললে এমন হয়। GitHub Pages-এ আপলোড করে লিংক থেকে খুলুন।"
+  )), 60000));
+  await Promise.race([ffmpeg.load({ coreURL, wasmURL, classWorkerURL }), timeout]);
+  loaded = true;
+}
+
+function ext(file, fallback) {
+  const m = file.name.match(/\.([a-z0-9]+)$/i);
+  return m ? m[1].toLowerCase() : fallback;
+}
+function baseName(file) { return file.name.replace(/\.[^.]+$/, ""); }
+async function safeDelete(name) { try { await ffmpeg.deleteFile(name); } catch (e) {} }
+
+/* ---------- মূল কাজ ---------- */
+let urls = [];
+
+$("go").onclick = async () => {
+  const all = [...$("video").files];
+  const thumb = $("thumb").files[0];
+  const secs = parseFloat($("secs").value) || 0;
+
+  if (!all.length || !thumb) { $("status").textContent = "ভিডিও আর ছবি দুটোই সিলেক্ট করুন।"; return; }
+
+  const videos = all.filter(f => f.size <= LIMIT);
+  const skipped = all.length - videos.length;
+  if (!videos.length) { $("status").textContent = "সব ভিডিও ২GB-র বেশি। Termux ব্যবহার করুন।"; return; }
+
+  $("go").disabled = true;
+  $("result").innerHTML = "";
+  urls.forEach(u => URL.revokeObjectURL(u));
+  urls = [];
+  $("bar").style.display = "block";
+  setPct(0);
+
+  const tIn = "thumb." + ext(thumb, "jpg");
+  let done = 0, failed = [];
+  fileTotal = videos.length;
+
+  try {
+    await loadFFmpeg();
+    await ffmpeg.writeFile(tIn, await fetchFile(thumb));
+
+    for (let i = 0; i < videos.length; i++) {
+      fileIdx = i;
+      const v = videos[i];
+      const vIn = "in." + ext(v, "mp4");
+      const out = "out.mp4";
+      $("status").textContent = `(${i + 1}/${videos.length}) প্রসেস হচ্ছে: ${v.name} — ট্যাব বন্ধ করবেন না।`;
+
+      try {
+        await ffmpeg.writeFile(vIn, await fetchFile(v));
+        const code = await ffmpeg.exec([
+          "-ss", String(secs), "-i", vIn, "-i", tIn,
+          "-map", "0", "-map", "1", "-c", "copy",
+          "-disposition:v:1", "attached_pic", out
+        ]);
+        if (code !== 0) throw new Error("ffmpeg কোড " + code);
+
+        const data = await ffmpeg.readFile(out);
+        const url = URL.createObjectURL(new Blob([data.buffer], { type: "video/mp4" }));
+        urls.push(url);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = baseName(v) + "_new.mp4";
+        a.textContent = "⬇ " + a.download;
+        $("result").appendChild(a);
+        done++;
+      } catch (e) {
+        console.error(e);
+        failed.push(v.name);
+      } finally {
+        await safeDelete(vIn);   // মেমোরি খালি করা
+        await safeDelete(out);
+      }
+      setPct(((i + 1) / videos.length) * 100, "প্রসেস");
+    }
+
+    await safeDelete(tIn);
+
+    let msg = `হয়ে গেছে! সফল: ${done}`;
+    if (failed.length) msg += `, ফেল: ${failed.length} (${failed.join(", ")})`;
+    if (skipped) msg += `, ২GB-র বেশি বলে বাদ: ${skipped}`;
+    $("status").textContent = msg;
+    if (done) setPct(100, "সম্পূর্ণ");
+  } catch (e) {
+    console.error(e);
+    $("status").textContent = "সমস্যা হয়েছে: " + e.message;
+  } finally {
+    $("go").disabled = false;
+    $("bar").style.display = "none";
+  }
+};
+</script>
+</body>
+</html>
