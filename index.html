@@ -50,6 +50,11 @@
   <label for="secs">শুরু থেকে কত সেকেন্ড কাটবেন</label>
   <input type="number" id="secs" value="5" min="0" step="0.1">
 
+  <label style="display:flex;gap:10px;align-items:flex-start;font-weight:400">
+    <input type="checkbox" id="first" checked style="width:auto;margin-top:5px">
+    <span>থাম্বনেইল প্রথম ফ্রেমে বসান (গ্যালারি/ফেসবুক/টেলিগ্রামে থাম্বনেইল দেখাবে)। ভিডিও রি-এনকোড হয় বলে ধীর। বন্ধ করলে দ্রুত হবে, কিন্তু বেশিরভাগ গ্যালারিতে ছবি দেখা যাবে না।</span>
+  </label>
+
   <button id="go">শুরু করুন</button>
   <progress id="bar" max="100" value="0"></progress>
   <div id="pct"></div>
@@ -238,11 +243,31 @@ $("go").onclick = async () => {
 
       try {
         await ffmpeg.writeFile(vIn, await fetchFile(v));
-        const code = await ffmpeg.exec([
-          "-ss", String(secs), "-i", vIn, "-i", tIn,
-          "-map", "0", "-map", "1", "-c", "copy",
-          "-disposition:v:1", "attached_pic", out
-        ]);
+        let code = -1;
+        if ($("first").checked) {
+          // ছবিটা প্রথম ০.৫ সেকেন্ড ভিডিওর ওপর বসে (অডিও সিঙ্ক ঠিক থাকে)
+          code = await ffmpeg.exec([
+            "-ss", String(secs), "-i", vIn,
+            "-framerate", "30", "-loop", "1", "-t", "1", "-i", tIn,
+            "-i", tIn,
+            "-filter_complex",
+            "[1:v][0:v]scale2ref=w=main_w:h=main_h:force_original_aspect_ratio=decrease[img][base];" +
+            "[base]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='lt(t,0.5)'[bg];" +
+            "[bg][img]overlay=x=(W-w)/2:y=(H-h)/2:enable='lt(t,0.5)':eof_action=repeat,format=yuv420p[v]",
+            "-map", "[v]", "-map", "0:a?", "-map", "2:v",
+            "-c:v:0", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:v:1", "copy", "-disposition:v:1", "attached_pic",
+            "-c:a", "copy", "-movflags", "+faststart", out
+          ]);
+          if (code !== 0) { await safeDelete(out); code = -1; }  // ফেল করলে নিচের দ্রুত পদ্ধতিতে যাবে
+        }
+        if (code !== 0) {
+          code = await ffmpeg.exec([
+            "-ss", String(secs), "-i", vIn, "-i", tIn,
+            "-map", "0", "-map", "1", "-c", "copy",
+            "-disposition:v:1", "attached_pic", out
+          ]);
+        }
         if (code !== 0) throw new Error("ffmpeg কোড " + code);
 
         const data = await ffmpeg.readFile(out);
